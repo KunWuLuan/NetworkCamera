@@ -1,5 +1,6 @@
 #include <iostream>	// cin,cout等
 #include <iomanip>	// setw等
+#include <mysql.h>	// mysql特有
 #include <stdlib.h>
 #include <stdio.h>
 #include <netinet/in.h>
@@ -18,6 +19,7 @@
 #include <signal.h>
 #include <string.h>
 #include <fstream>
+#include "SqlCtl.h"
 #define CLNTNUM 10						//最多10个用户
 #define CAMNUM 10						//最多10个摄像头
 using namespace std;
@@ -27,15 +29,28 @@ int place;								//某个客户端放置的位置
 int sndLen, rcvLen;
 char ipAddr[INET_ADDRSTRLEN];
 string loginHtml;
+string errorUserHtml;					//虽然比起loginHtml只是多了报错的一句话,
+										//但是为了减少文本处理(要计算长度)
+										//采取另外读取一个文件
+string camListHtml;
+string temp;
+sql_ctl mariaDB;
 
 struct CLNT
 {
 	int sock;							//用户每次点击网页可能在变
-	char ipAddr[INET_ADDRSTRLEN];		//标记用户
+	int port;
+	/*用户名和密码不一定存在,新用户可能还没有注册*/
+	string username;					//登录的用户名 查数据库要用
+	string password;					//登录的密码
+	char ipAddr[INET_ADDRSTRLEN];		//标记用户ip
 	bool identified;					//标记用户是否经过了本地认证
 	int cameraNum;						//摄像头编号(不是摄像头的socket)
 										//某个用户正在访问的摄像头数据
 	bool isWatching;					//已经在看了,没有绑定这一操作
+	int numOfCam;
+	//string *camList;			
+	string camList[2];
 }clnt[CLNTNUM];
 
 struct CAMERA
@@ -74,10 +89,9 @@ bool InitDaemon()
 	return 0;
 }
 
-void InitLogin()
+void InitHtml()
 {
 	ifstream in("login.html",ios::in);
-	string temp;
 	while (getline(in, temp))
 	{
 		loginHtml += temp;
@@ -89,7 +103,6 @@ void InitLogin()
 	temp += "X-Powered-By: PHP/5.4.16\r\n";
 	temp += "Content-Length: ";
 	char contentLen[10];
-	int len = loginHtml.length();
 	sprintf(contentLen, "%d", loginHtml.length());
 	temp += contentLen;
 	temp += "\r\n";
@@ -98,9 +111,40 @@ void InitLogin()
 	temp += "Content-Type: text/html; charset=gbk\r\n";
 	temp += "\r\n";
 	temp += loginHtml;
-
 	loginHtml = temp;
-	cout << loginHtml << endl;
+	
+	ifstream in1("erroUser.html", ios::in);
+	while (getline(in1, temp))
+	{
+		loginHtml += temp;
+		loginHtml += '\n';
+	}
+	in1.close();
+	temp = "HTTP/1.1 200 OK\r\n";
+	temp += "Server: Apache/2.4.6 (Red Hat Enterprise Linux) PHP/5.4.16\r\n";
+	temp += "X-Powered-By: PHP/5.4.16\r\n";
+	temp += "Content-Length: ";
+	sprintf(contentLen, "%d", errorUserHtml.length());
+	temp += contentLen;
+	temp += "\r\n";
+	//temp += "Keep-Alive: timeout=5, max=100\r\n";
+	//temp += "Connection: Keep-Alive\r\n";
+	temp += "Content-Type: text/html; charset=gbk\r\n";
+	temp += "\r\n";
+	temp += errorUserHtml;
+	errorUserHtml = temp;
+
+}
+
+void ConnTable1()
+{
+	//连接用户认证表
+	mariaDB.connect("root", "1002.lkj555", "localhost",  0, "demo");
+}
+
+void ConnTable2()
+{
+	//连接用户信息表
 }
 
 /*设为阻塞非阻塞*/
@@ -228,7 +272,7 @@ bool IsPost()
 {
 	//判断收到的是不是post包 操作
 	cout << "判断收到的是不是post包" << endl;
-	if (strstr(BUF, "POST / HTTP/ 1.1"))
+	if (strstr(BUF, "POST / HTTP/1.1"))
 		return 1;
 	return 0;
 
@@ -269,7 +313,6 @@ bool Accept(int & sock, int & connect_fd,
 		(struct sockaddr*)&connect_addr, &connect_len);
 	inet_ntop(AF_INET, &(connect_addr.sin_addr), ipAddr, sizeof(ipAddr));
 	cout << ipAddr << "发起连接" << endl;
-	sleep(5);
 	if (connect_fd == -1)
 	{
 		if (errno == 11)		//时钟中断可能会导致这个问题
@@ -310,20 +353,164 @@ int CamToUser(int cameraNum)
 	return -1;	//不应该出现这种情况
 }
 
-void SendIdentifyWeb(int sock)
+void SendIdentifyWeb(int sock,bool flag = 0)
 {
-	sndLen = send(sock, loginHtml.c_str(), loginHtml.length(), 0);
+	temp = loginHtml;
+	if (flag == true)
+		temp = errorUserHtml;
+
+	sndLen = send(sock, temp.c_str(), temp.length(), 0);
 	cout << "发送的html长度为"<< sndLen << endl;
 }
 
-void UserIdentify(int sock)
+bool UserIdentify(int clntPlace)
 {
 	/*认证失败直接告知信息,认证成功则将所有该用户绑定的摄像头信息返回给用户*/
+	cout << "进行用户认证中" << endl;
+	string username, password;
+	char *ptr;
+	ptr = strstr(BUF, "username=");
+	ptr = ptr + 9;
+	int i;
+	for (i = 0;ptr[i] != '&'; i++)
+		username += ptr[i];
+	i += 10;
+	for (; ptr[i] != '&'; i++)
+		password += ptr[i];
+	
+	cout << "username:" << username << endl;
+	cout << "password:" << password << endl;
+	clnt[clntPlace].username = username;
+	clnt[clntPlace].password = password;
+	/*这里要调数据库进行对比*/
+	/*连接认证表*/
+	ConnTable1();
+	/* 设置字符集，否则读出的字符乱码，即使/etc/my.cnf中设置也不行 */
+	mysql_set_character_set(&mariaDB.myCont, "gbk");
+	if (mariaDB.confirm(username, password) == 1)
+	{
+		/*如果认证通过,推送该用户绑定的摄像头的网页*/
+		clnt[clntPlace].identified = 1;
+		return 1;
+	}
+	/*认证失败,推送失败告知网页*/
+	return 0;
+}
+
+void SendCamList(int sock,bool flag = 0,int clntPlace = -1)
+{
+	/*从数据库获取用户摄像头数据*/
+	int numOfCam = 2;
+	string table2_row[2] = { "192.168.80.230:5000",
+		"192.168.80.230:6000" };	//最外层表示第几个摄像头然后 0为username 1为cid
+
+	clnt[clntPlace].numOfCam = 2;
+	clnt[clntPlace].camList[0] = table2_row[0];
+	clnt[clntPlace].camList[1] = table2_row[1];
+
+	ifstream in("camList.html", ios::in);
+	while (getline(in, temp))
+	{
+		if (temp == "<!替换模板>")
+			break;
+		camListHtml += temp;
+		camListHtml += '\n';
+	}
+	int i;
+	char num = '1';	//在此假定用户不超过9个摄像头
+	for (i = 0; i < numOfCam; i++, num++)
+	{
+		camListHtml += "<tr>\r\n <td>";
+		camListHtml += table2_row[i];
+		camListHtml += "</td>\r\n <form action=\"\" method=\"post\">\r\n";
+		camListHtml += "<td><input type = \"submit\" name = \"CamNum";
+		camListHtml += num;	//用来判断用户选择了哪个摄像头
+		camListHtml += "$\" value = \"确认\" > </td>\r\n </form>\r\n </tr>\r\n";
+	}
+	if(flag == true)
+		camListHtml += "<script>alert('所选择的摄像头未连接,请另选');</script>\r\n";
+	getline(in, temp);
+	while (getline(in, temp))
+	{
+		camListHtml += temp;
+		camListHtml += '\n';
+	}
+	in.close();
+	temp = "HTTP/1.1 200 OK\r\n";
+	temp += "Server: Apache/2.4.6 (Red Hat Enterprise Linux) PHP/5.4.16\r\n";
+	temp += "X-Powered-By: PHP/5.4.16\r\n";
+	temp += "Content-Length: ";
+	char contentLen[10];
+	sprintf(contentLen, "%d", camListHtml.length());
+	temp += contentLen;
+	temp += "\r\n";
+	//temp += "Keep-Alive: timeout=5, max=100\r\n";
+	//temp += "Connection: Keep-Alive\r\n";
+	temp += "Content-Type: text/html; charset=gbk\r\n";
+	temp += "\r\n";
+	temp += camListHtml;
+	cout << "camListWeb" << endl;
+	//cout << temp << endl;
+	sndLen = send(sock, temp.c_str(), temp.length(), 0);
+}
+
+void GetCamInfo(int sock,int clntPlace)
+{
+	//向对应socket的摄像头服务器发送摄像头信息请求get包
+	string Get;
+	Get = "GET / HTTP/1.1\r\n";
+	Get += "Host: ";
+	Get += clnt[clntPlace].ipAddr;
+	char Len[10];
+	sprintf(Len, "%d", clnt[clntPlace].port);
+	Get += Len;
+	Get += "\r\n";
+	Get += "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:57.0) Gecko/20100101 Firefox/57.0\r\n";
+	Get += "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\r\n";
+	Get += "Accept-Language: zh-CN,zh;q=0.8,zh-TW;q=0.7,zh-HK;q=0.5,en-US;q=0.3,en;q=0.2\r\n";
+	Get += "Accept-Encoding: gzip, deflate\r\n";
+	Get += "Connection: keep-alive\r\n";
+	Get += "Upgrade-Insecure-Requests: 1\r\n";
+	sndLen = send(sock, Get.c_str(), Get.length(), 0);
 }
 
 void BindCam(int clntPlace)
 {
-
+	char *ptr = strstr(BUF, "CamNum");
+	ptr += 6;
+	int camNum = ptr[0] - '0';
+	/*从该用户的摄像头列表中找对应摄像头的ip+port*/
+	cout << "camNum="<<camNum << endl;
+	cout << clnt[clntPlace].camList[camNum - 1] << endl;
+	string cid = clnt[clntPlace].camList[camNum - 1];
+	cout << "还没挂" << endl;
+	const char*p_cid = cid.c_str();
+	cout << p_cid << endl;
+	int i = 0;
+	for (; p_cid[i] != ':'; i++)
+		ipAddr[i] = p_cid[i];
+	ipAddr[i] = '\0';
+	cout << ipAddr << endl;
+	i++;
+	char c_port[10];
+	int j;
+	for (j = 0; p_cid[i] != '\0'; i++, j++)
+		c_port[j] = p_cid[i];
+	c_port[j] = '\0';
+	cout << c_port << endl;
+	int port = atoi(c_port);
+	place = SearchPlace(ipAddr, 1, port);
+	if (place < 0)
+	{
+		SendCamList(clnt[clntPlace].sock, 1);
+	}
+	else
+	{
+		clnt[clntPlace].cameraNum = place;
+		clnt[clntPlace].isWatching = 1;
+		cout << "绑定的摄像头ip为" << cam[place].ipAddr << endl;
+		GetCamInfo(cam[place].sock,clntPlace);	//之后将会开始数据转发
+	}
 }
 
 int main(int argc, char* argv[])
@@ -331,7 +518,7 @@ int main(int argc, char* argv[])
 	int i;
 	InitDaemon();
 
-	InitLogin();
+	InitHtml();
 
 	//一个提供给客户连接,一个提供给每个摄像头服务器连接
 	int sockForClnt, sockForCam;
@@ -366,8 +553,10 @@ int main(int argc, char* argv[])
 	for (i = 0; i < CAMNUM; i++)
 	{
 		cam[i].ipAddr[0] = '*';
-		cam[i].timer = 0;
+		cam[i].timer = -1;
 	}
+	//strcpy(cam[0].ipAddr, "192.168.80.230");
+	//cam[0].port = 5000;
 	//SetTimer();
 
 	fd_set rfd;
@@ -383,13 +572,13 @@ int main(int argc, char* argv[])
 	struct sockaddr_in connect_addr;
 	socklen_t connect_len;
 	char connect_ip[INET_ADDRSTRLEN];
-	cout << "接受客户端的socket为" << sockForClnt << endl;
-	cout << "接受摄像头的socket为" << sockForCam << endl;
-	cout << "maxfd " << maxfd << endl;
+	//cout << "接受客户端的socket为" << sockForClnt << endl;
+	//cout << "接受摄像头的socket为" << sockForCam << endl;
+	//cout << "maxfd " << maxfd << endl;
 	while (1)
 	{
 		rfd = rfdb;
-		timeout.tv_sec = 3;
+		timeout.tv_sec = 20;
 		timeout.tv_usec = 0;
 		res = select(maxfd + 1, &rfd, NULL, NULL, &timeout);
 		if (res == 0)
@@ -439,12 +628,15 @@ int main(int argc, char* argv[])
 							 *在这里只需要更新保存的socket
 							 */
 							clnt[place].sock = connect_fd;
+							clnt[place].port = connect_addr.sin_port;
 							cout << "该客户已经连接" << endl;
 						}
 						else
 						{
 							/*标记该用户的信息,需要认证*/
 							place = SearchEmpty(0);
+							if (place < 0)
+								continue;	//不管了,容纳的用户满了
 							clnt[place].sock = connect_fd;
 							strcpy(clnt[place].ipAddr, ipAddr);
 							cout << "place=" << place << endl;
@@ -454,8 +646,9 @@ int main(int argc, char* argv[])
 					}
 					else
 					{
-						cout << BUF << endl;
 						rcvLen = recv(i, BUF, sizeof(BUF), 0);
+						cout << "读到的包为：" << endl;
+						cout << BUF << endl;
 						/*得到发来信息的sock的ip及其端口号*/
 						res = getpeername(i, (struct sockaddr*)&connect_addr, &connect_len);
 						inet_ntop(AF_INET, &(connect_addr.sin_addr), ipAddr, sizeof(ipAddr));
@@ -480,6 +673,7 @@ int main(int argc, char* argv[])
 							place = SearchPlace(ipAddr, 0);
 							if (rcvLen == 0)
 							{
+								cout << ipAddr << "主动关闭" << endl;
 								close(clnt[place].sock);
 								continue;
 							}
@@ -488,14 +682,22 @@ int main(int argc, char* argv[])
 								/*没有经过认证*/
 								if (IsGet())
 								{
+									cout << "是get包" << endl;
 									/*推送认证网页*/
-									SendIdentifyWeb(i);
+									SendIdentifyWeb(i,0);
 									continue;
 								}
 								else if (IsPost())
 								{
+									cout << "是post包" << endl;
 									/*进行用户认证*/
-									UserIdentify(i);
+									if (UserIdentify(place) == true)
+									{
+										cout << "认证通过" << endl;
+										SendCamList(i,0,place);
+									}
+									else
+										SendIdentifyWeb(i,1);
 									continue;
 								}
 								cout << "居然既不是post也不是get？" << endl;
@@ -506,12 +708,14 @@ int main(int argc, char* argv[])
 								/*已经通过了认证,看用户是否已经选择了摄像头 POST包*/
 								/*如果用户已经选择了摄像头*/
 								/*回放还是直播归摄像头服务器处理,这里只做简单转发*/
+								/*必然是post包*/
 								if (IsPost() && !clnt[place].isWatching)
 								{
 									/*根据用户的选择,绑定相应的摄像头*/
 									/*向对应的摄像头服务器发送get包*/
 									/*摄像头回包的时候因为用户已经绑定*/
 									/*所以也知道该往哪里转发*/
+									cout << "绑定摄像头" << endl;
 									BindCam(place);
 								}
 								else

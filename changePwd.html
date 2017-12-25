@@ -1,0 +1,82 @@
+<html>
+  <head>
+    <script>
+      function validateForm() {
+          var oldpassword = document.forms["password"]["oldpassword"].value;
+          var newpassword1 = document.forms["password"]["newpassword1"].value;
+          var newpassword2 = document.forms["password"]["newpassword2"].value;
+          if (newpassword2 != newpassword1) {
+              alert("两次输入密码不同");
+              return false;
+          }
+          if (oldpassword == newpassword1 || oldpassword == newpassword2) {
+              alert("新旧密码不能相同");
+              return false;
+          }
+          if(newpassword1.length<10){
+              alert("密码不能少于10位");
+              return false;
+          }
+          if(newpassword1.length>16){
+              alert("密码不能多于16位");
+              return false;
+          }
+          var txt1=newpassword1.toUpperCase();
+          var txt2=newpassword1.toLowerCase();
+          if(txt1==newpassword1){
+              alert("密码必须含有小写字母");
+              return false;
+          }
+          if(txt2==newpassword1){
+              alert("密码必须含有大写字母");
+              return false;
+          }
+          var re=/.*[0-9].*/;
+          if(re.test(newpassword1)==false)
+          {
+              alert("密码必须含有数字");
+              return false;
+          }
+          return true;
+      }
+    </script>
+  </head>
+  <body>
+    <div id="main" style="width:30%; height:500px; float:left">
+      <center><h2>修改密码</h2></center>
+      <br/>
+      <table align="center" width="280" border="1" cellpadding="2" cellspacing="0">
+        <form name="password" onsubmit="return validateForm()" method="post" action="" enctype="multipart/form-data">
+          <tr>
+            <!-- 用户名：区域 -->
+            <td>用户名：</td>
+            <td>1552157</td>
+          </tr>
+          <tr>
+            <td>*旧密码：</td>
+            <td><input id="oldpassword" type="password" name="oldpassword" size="18" value="" maxlength="16"></td>
+          </tr>
+          <tr>
+            <td>*新密码：</td>
+            <td><input id="newpassword1" type="password" name="newpassword1" size="18" value="" maxlength="16"></td>
+          </tr>
+          <tr>
+            <td>*新密码：</td>
+            <td><input id="newpassword2" type="password" name="newpassword2" size="18" value="" maxlength="16"></td>
+          </tr>
+          <tr>
+            <td colspan="2" align="center" >
+              <input type="submit" name="sub" value="提交">
+        </form>
+      </table>
+      <table align="center" width="280" border="0" cellpadding="2" cellspacing="0" style="color:red" colspan="2">
+        <font size="3" color="red">
+          <tr>
+            <th>密码长度为10-16位</th></tr><tr><th>必须同时包含数字/大小写字母</th>
+          </tr>
+          <!-- 提示区域 -->
+          <td>密码必须同时包含数字、字母和其它符号!</td>
+        </div>
+      </div>
+    </body>
+</html>
